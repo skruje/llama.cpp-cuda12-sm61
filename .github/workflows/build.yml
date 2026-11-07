@@ -70,15 +70,21 @@ jobs:
 
       - name: Configure CMake for CUDA 12 & sm_61 (Ninja + ccache)
         run: |
+          rm -rf build
+
           cmake -B build -G Ninja \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES="61" \
+            -DGGML_CUDA_ARCHITECTURES="61" \
+            -DGGML_CUDA_FORCE_MMQ=ON \
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_CUDA_NCCL=OFF \
+            -DGGML_NCCL=OFF \
+            -DCMAKE_DISABLE_FIND_PACKAGE_NCCL=ON \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=ON \
             -DLLAMA_BUILD_IS_DEV=OFF \
@@ -94,17 +100,26 @@ jobs:
 
       - name: Package Binary Artifacts
         run: |
-          # 1. Define folder name
           FOLDER_NAME="llama-cuda12-sm61-${{ needs.check-and-build.outputs.latest_tag }}"
-
-          # 2. Create the target directory structure
           mkdir -p "$FOLDER_NAME"
 
-          # 3. Copy only the compiled binaries (skipping static .a libs)
+          # Copy binaries into the named subfolder
           cp build/bin/llama-* "$FOLDER_NAME/" 2>/dev/null || true
           [ -f build/bin/llama ] && cp build/bin/llama "$FOLDER_NAME/"
 
-          # 4. Tar up the folder as a parent directory
+          # Sanity check to make sure libnccl isn't dynamically linked
+          TARGET_BIN="$FOLDER_NAME/llama-cli"
+          [ ! -f "$TARGET_BIN" ] && TARGET_BIN="$FOLDER_NAME/llama"
+          
+          echo "--- Checking shared library dependencies for $TARGET_BIN ---"
+          ldd "$TARGET_BIN"
+
+          if ldd "$TARGET_BIN" 2>/dev/null | grep -i nccl; then
+            echo "ERROR: Binary linked against libnccl.so! Failing workflow."
+            exit 1
+          fi
+
+          # Archive the top-level directory structure
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
 
       - name: Create GitHub Release
