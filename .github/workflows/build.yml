@@ -46,7 +46,7 @@ jobs:
       - name: Install System Prerequisites
         run: |
           apt-get update && apt-get install -y \
-            git cmake build-essential curl jq tar
+            git cmake build-essential curl jq tar ninja-build ccache
 
       - name: Checkout llama.cpp at release tag
         uses: actions/checkout@v4
@@ -55,12 +55,31 @@ jobs:
           ref: ${{ needs.check-and-build.outputs.latest_tag }}
           submodules: recursive
 
-      - name: Configure CMake for CUDA 12 & sm_61
+      - name: Set up ccache cache directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-sm61-${{ needs.check-and-build.outputs.latest_tag }}
+          restore-keys: |
+            ccache-sm61-
+
+      - name: Configure ccache environment
         run: |
-          cmake -B build \
+          # Set max cache size to 2GB to stay within GitHub cache limits
+          ccache --max-size=2G
+          # Zero statistics prior to build so we can inspect hits afterwards
+          ccache -z
+
+      - name: Configure CMake for CUDA 12 & sm_61 (Ninja + ccache)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES="61" \
             -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
             -DGGML_NCCL=OFF \
             -DLLAMA_BUILD_IS_DEV=OFF \
             -DCMAKE_BUILD_TYPE=Release
@@ -68,6 +87,10 @@ jobs:
       - name: Compile llama.cpp
         run: |
           cmake --build build --config Release -j$(nproc)
+
+      - name: Print ccache Statistics
+        run: |
+          ccache -s
 
       - name: Package Binary Artifacts
         run: |
