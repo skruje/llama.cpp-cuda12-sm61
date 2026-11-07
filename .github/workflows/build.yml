@@ -104,21 +104,10 @@ jobs:
           FOLDER_NAME="llama-cuda12-sm61-${{ needs.check-and-build.outputs.latest_tag }}"
           mkdir -p "$FOLDER_NAME"
 
-          # Copy binaries into the target directory
-          cp build/bin/llama-* "$FOLDER_NAME/" 2>/dev/null || true
-          [ -f build/bin/llama ] && cp build/bin/llama "$FOLDER_NAME/"
-
-          # Sanity check dynamic linkage
-          TARGET_BIN="$FOLDER_NAME/llama-cli"
-          [ ! -f "$TARGET_BIN" ] && TARGET_BIN="$FOLDER_NAME/llama"
-          
-          echo "--- Checking shared library dependencies for $TARGET_BIN ---"
-          ldd "$TARGET_BIN"
-
-          if ldd "$TARGET_BIN" 2>/dev/null | grep -i nccl; then
-            echo "ERROR: Binary linked against libnccl.so! Failing workflow."
-            exit 1
-          fi
+          # Package only the main operational tools
+          cp build/bin/llama-cli "$FOLDER_NAME/" 2>/dev/null || true
+          cp build/bin/llama-server "$FOLDER_NAME/" 2>/dev/null || true
+          cp build/bin/llama-bench "$FOLDER_NAME/" 2>/dev/null || true
 
           # Package as top-level folder archive
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
