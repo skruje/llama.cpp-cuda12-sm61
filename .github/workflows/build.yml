@@ -78,7 +78,7 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES="61" \
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_NCCL=OFF \
+            -DGGML_CUDA_NCCL=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=ON \
             -DLLAMA_BUILD_IS_DEV=OFF \
