@@ -61,8 +61,7 @@ jobs:
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES="61" \
             -DGGML_NATIVE=OFF \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DCMAKE_CUDA_RUNTIME_LIBRARY=Static \
+            -DGGML_NCCL=OFF \
             -DLLAMA_BUILD_IS_DEV=OFF \
             -DCMAKE_BUILD_TYPE=Release
 
