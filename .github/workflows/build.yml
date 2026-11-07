@@ -65,9 +65,7 @@ jobs:
 
       - name: Configure ccache environment
         run: |
-          # Set max cache size to 2GB to stay within GitHub cache limits
           ccache --max-size=2G
-          # Zero statistics prior to build so we can inspect hits afterwards
           ccache -z
 
       - name: Configure CMake for CUDA 12 & sm_61 (Ninja + ccache)
@@ -81,6 +79,8 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_NCCL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=ON \
             -DLLAMA_BUILD_IS_DEV=OFF \
             -DCMAKE_BUILD_TYPE=Release
 
@@ -94,10 +94,18 @@ jobs:
 
       - name: Package Binary Artifacts
         run: |
-          mkdir -p dist
-          cp build/bin/* dist/ 2>/dev/null || true
+          # 1. Define folder name
+          FOLDER_NAME="llama-cuda12-sm61-${{ needs.check-and-build.outputs.latest_tag }}"
 
-          tar -czvf llama-cuda12-sm61-${{ needs.check-and-build.outputs.latest_tag }}.tar.gz -C dist .
+          # 2. Create the target directory structure
+          mkdir -p "$FOLDER_NAME"
+
+          # 3. Copy only the compiled binaries (skipping static .a libs)
+          cp build/bin/llama-* "$FOLDER_NAME/" 2>/dev/null || true
+          [ -f build/bin/llama ] && cp build/bin/llama "$FOLDER_NAME/"
+
+          # 4. Tar up the folder as a parent directory
+          tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
