@@ -20,13 +20,10 @@ env:
   UPSTREAM_REPO: ggml-org/llama.cpp
   # Number of b#### pre-releases to keep in this repo (stable releases are always kept)
   KEEP_PRERELEASES: 10
-  # CUDA version of the build image. The runtime libraries are published once per
-  # version as a separate release (tag: cuda-<version>-libs), so bumping this is
-  # what triggers a new libraries tarball.
-  # 12.9 is the last CUDA 12.x release and the last one that can target Pascal.
+  # CUDA version of the build image. Matches the local CUDA 12.2 environment.
   # NOTE: the container image cannot use the env context, so it is hardcoded in
-  # both jobs below — keep it in sync with CUDA_VERSION.
-  CUDA_VERSION: '12.9'
+  # the build job below — keep it in sync with CUDA_VERSION.
+  CUDA_VERSION: '12.2'
 
 jobs:
   check:
@@ -98,157 +95,9 @@ jobs:
             echo "Matrix: $MATRIX"
           fi
 
-  libs-check:
-    runs-on: ubuntu-22.04
-    outputs:
-      needs_libs: ${{ steps.check.outputs.needs_libs }}
-    steps:
-      - name: Check whether the CUDA libraries release exists
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="cuda${CUDA_VERSION}-libs"
-          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
-          if [ "$CODE" = "200" ]; then
-            echo "Release ${TAG} already exists, nothing to do"
-            echo "needs_libs=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Release ${TAG} is missing, it will be published"
-            echo "needs_libs=true" >> "$GITHUB_OUTPUT"
-          fi
-
-  cuda-libs:
-    # Publishes the CUDA runtime libraries once per CUDA version. Bump CUDA_VERSION
-    # (and the container image) to produce a new tarball.
-    needs: libs-check
-    if: needs.libs-check.outputs.needs_libs == 'true'
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    defaults:
-      run:
-        shell: bash
-    container:
-      image: nvidia/cuda:12.9.2-devel-ubuntu22.04
-    steps:
-      - name: Install prerequisites
-        run: |
-          apt-get update && apt-get install -y curl jq tar patchelf
-
-      - name: Collect CUDA runtime libraries
-        run: |
-          set -euo pipefail
-          FOLDER="cuda${CUDA_VERSION}-libs"
-          mkdir -p "$FOLDER/lib"
-
-          # Deliberately NOT bundled:
-          #   libcuda.so.1 / libnvidia-*  -> supplied by the host NVIDIA driver
-          #   glibc, libstdc++, libgcc_s  -> supplied by the host OS
-          BASELINE='^(linux-vdso|ld-linux|libc\.so|libm\.so|libpthread\.so|libdl\.so|librt\.so|libgcc_s\.so|libstdc\+\+\.so|libresolv\.so|libutil\.so|libanl\.so|libmvec\.so|libcuda\.so|libnvidia-)'
-
-          deps_of() {
-            ldd "$@" 2>/dev/null | awk '/=> \// {print $3}'
-          }
-
-          # Seed with the CUDA runtime the binaries link against. These are the only
-          # non-system libraries in the build (OpenSSL is disabled).
-          SEEDS=()
-          for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
-            if [ -e "/usr/local/cuda/lib64/$lib" ]; then
-              SEEDS+=("/usr/local/cuda/lib64/$lib")
-            fi
-          done
-          if [ ${#SEEDS[@]} -eq 0 ]; then
-            echo "No CUDA libraries found in /usr/local/cuda/lib64"; exit 1
-          fi
-          echo "Seeding from: ${SEEDS[*]}"
-
-          # Copy the seed libraries themselves first — the dependency walk below
-          # only collects what they link against, not the seeds.
-          for lib in "${SEEDS[@]}"; do
-            base=$(basename "$lib")
-            cp -L "$lib" "$FOLDER/lib/$base"
-            echo "bundled $base"
-          done
-
-          # Walk the dependency graph until it is closed
-          mapfile -t DEPS < <(deps_of "${SEEDS[@]}")
-          while :; do
-            added=0
-            for lib in "${DEPS[@]}"; do
-              base=$(basename "$lib")
-              [[ "$base" =~ $BASELINE ]] && continue
-              [ -e "$FOLDER/lib/$base" ] && continue
-              cp -L "$lib" "$FOLDER/lib/$base"
-              echo "bundled $base"
-              added=1
-              mapfile -t -O "${#DEPS[@]}" DEPS < <(deps_of "$lib")
-            done
-            [ "$added" -eq 0 ] && break
-          done
-
-          # Bundled libraries must find each other in the same directory
-          for lib in "$FOLDER"/lib/*.so*; do
-            patchelf --set-rpath '$ORIGIN' "$lib"
-          done
-
-          ls -1 "$FOLDER/lib" | sort > libs.txt
-          echo "--- libs.txt ---"; cat libs.txt
-          du -sh "$FOLDER/lib"
-
-          # Archive the whole folder, so extracting it next to the
-          # llama-cuda12-sm61-<tag> folder gives:
-          #   <parent>/cuda12.9-libs/lib/...
-          #   <parent>/llama-cuda12-sm61-<tag>/llama-server
-          tar -czvf "${FOLDER}.tar.gz" "$FOLDER"
-
-      - name: Publish CUDA libraries release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: cuda${{ env.CUDA_VERSION }}-libs
-          name: "CUDA ${{ env.CUDA_VERSION }} runtime libraries (sm61)"
-          body: |
-            CUDA runtime libraries required by the `llama-cuda12-sm61-*` binaries:
-            `libcudart`, `libcublas`, `libcublasLt` and their dependencies. See `libs.txt`
-            for the exact list.
-
-            Extract it **next to** the llama.cpp folder (not inside it). The binaries look for
-            `../cuda${{ env.CUDA_VERSION }}-libs/lib` first, then `./lib`:
-
-            ```sh
-            tar -xzvf llama-cuda12-sm61-<tag>.tar.gz
-            tar -xzvf cuda${{ env.CUDA_VERSION }}-libs.tar.gz
-            ./llama-cuda12-sm61-<tag>/llama-server --version
-            ```
-
-            Resulting layout:
-
-            ```
-            .
-            ├── cuda${{ env.CUDA_VERSION }}-libs/
-            │   └── lib/
-            └── llama-cuda12-sm61-<tag>/
-                ├── llama-cli
-                ├── llama-server
-                └── llama-bench
-            ```
-
-            Not included (expected from the host): `libcuda.so.1` / `libnvidia-*` (NVIDIA driver) and glibc / libstdc++ / libgcc_s (base OS).
-          files: |
-            cuda${{ env.CUDA_VERSION }}-libs.tar.gz
-            libs.txt
-          # Never let the libraries release take the "Latest" badge from llama.cpp
-          make_latest: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build:
-    needs: [check, cuda-libs]
-    # !cancelled() so this still runs when cuda-libs was skipped (libs already published)
-    if: ${{ !cancelled() && needs.check.outputs.has_work == 'true' }}
+    needs: check
+    if: needs.check.outputs.has_work == 'true'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -261,14 +110,14 @@ jobs:
         # Container jobs can default to sh (dash); make sure steps run under bash
         shell: bash
     container:
-      # CUDA 12.9 — last 12.x release, last one that can target Pascal (sm_61)
-      image: nvidia/cuda:12.9.2-devel-ubuntu22.04
+      # Matches the local CUDA 12.2 environment
+      image: nvidia/cuda:12.2.2-devel-ubuntu22.04
 
     steps:
       - name: Install System Prerequisites
         run: |
           apt-get update && apt-get install -y \
-            git cmake build-essential curl jq tar ninja-build ccache patchelf
+            git cmake build-essential curl jq tar ninja-build ccache
 
       - name: Checkout llama.cpp at tag
         uses: actions/checkout@v4
@@ -303,9 +152,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-cuda129-sm61-${{ matrix.tag }}
+          key: ccache-cuda122-sm61-${{ matrix.tag }}
           restore-keys: |
-            ccache-cuda129-sm61-
+            ccache-cuda122-sm61-
 
       - name: Configure ccache environment
         run: |
@@ -359,7 +208,6 @@ jobs:
       - name: Package Binary Artifacts
         run: |
           FOLDER_NAME="llama-cuda12-sm61-${{ matrix.tag }}"
-          LIBS_DIR="cuda${CUDA_VERSION}-libs"
           mkdir -p "$FOLDER_NAME"
 
           # Package only the main operational tools
@@ -367,33 +215,10 @@ jobs:
           cp build/bin/llama-server "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-bench "$FOLDER_NAME/" 2>/dev/null || true
 
-          # The CUDA libraries are published separately, once per CUDA version, as
-          # cuda<version>-libs.tar.gz. The binaries look for them in a sibling
-          # folder first (../cuda<version>-libs/lib), then ./lib.
-          for bin in "$FOLDER_NAME"/llama-*; do
-            patchelf --set-rpath "\$ORIGIN/../${LIBS_DIR}/lib:\$ORIGIN/lib" "$bin"
-            echo "$(basename "$bin") rpath: $(patchelf --print-rpath "$bin")"
-          done
-
-          # End-to-end check: fetch the published libraries, lay them out exactly as
-          # a user would, and confirm the binaries resolve everything but the driver.
-          gh release download "${LIBS_DIR}" \
-            --repo "${{ github.repository }}" \
-            --pattern "${LIBS_DIR}.tar.gz" --dir /tmp/libs
-          tar -xzf "/tmp/libs/${LIBS_DIR}.tar.gz" -C /tmp
-
-          MISSING=$(ldd "$FOLDER_NAME"/llama-* | awk '/not found/ {print $1}' | sort -u | grep -v '^libcuda\.so' || true)
-          if [ -n "$MISSING" ]; then
-            echo "Unresolved dependencies:"; echo "$MISSING"; exit 1
-          fi
-          echo "All dependencies resolved (except the driver)"
-
           du -sh "$FOLDER_NAME"
 
           # Package as top-level folder archive
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -403,15 +228,7 @@ jobs:
           body: |
             Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA ${{ env.CUDA_VERSION }} for Pascal architecture (Compute Capability 6.1).
 
-            **This archive contains the binaries only.** The CUDA libraries are published once per CUDA version in the [`cuda${{ env.CUDA_VERSION }}-libs`](https://github.com/${{ github.repository }}/releases/tag/cuda${{ env.CUDA_VERSION }}-libs) release. Extract both archives side by side:
-
-            ```sh
-            tar -xzvf llama-cuda12-sm61-${{ matrix.tag }}.tar.gz
-            tar -xzvf cuda${{ env.CUDA_VERSION }}-libs.tar.gz
-            ./llama-cuda12-sm61-${{ matrix.tag }}/llama-server --version
-            ```
-
-            The binaries look for the libraries in `../cuda${{ env.CUDA_VERSION }}-libs/lib`, so that folder must sit next to the `llama-cuda12-sm61-${{ matrix.tag }}` folder.
+            Requires the CUDA ${{ env.CUDA_VERSION }} runtime libraries on the host (or set `LD_LIBRARY_PATH` to a CUDA ${{ env.CUDA_VERSION }} `lib64` directory).
 
             Built with `LLAMA_OPENSSL=OFF`, so HTTPS and Hugging Face model downloads are not available in `llama-server`.
           # b#### builds are marked as pre-releases; numbered releases are regular releases
