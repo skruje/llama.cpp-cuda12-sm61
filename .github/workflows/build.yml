@@ -107,7 +107,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="cuda-${CUDA_VERSION}-libs"
+          TAG="cuda${CUDA_VERSION}-libs"
           CODE=$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
@@ -121,7 +121,7 @@ jobs:
 
   cuda-libs:
     # Publishes the CUDA runtime libraries once per CUDA version. Bump CUDA_VERSION
-    # (and the container image) to produce a new libraries tarball.
+    # (and the container image) to produce a new tarball.
     needs: libs-check
     if: needs.libs-check.outputs.needs_libs == 'true'
     runs-on: ubuntu-22.04
@@ -135,12 +135,12 @@ jobs:
     steps:
       - name: Install prerequisites
         run: |
-          apt-get update && apt-get install -y curl jq tar libssl-dev patchelf
+          apt-get update && apt-get install -y curl jq tar patchelf
 
       - name: Collect CUDA runtime libraries
         run: |
           set -euo pipefail
-          FOLDER="cuda-${CUDA_VERSION}-libs"
+          FOLDER="cuda${CUDA_VERSION}-libs"
           mkdir -p "$FOLDER/lib"
 
           # Deliberately NOT bundled:
@@ -152,21 +152,16 @@ jobs:
             ldd "$@" 2>/dev/null | awk '/=> \// {print $3}'
           }
 
-          # Seed with the libraries ggml-cuda links against, plus OpenSSL
+          # Seed with the CUDA runtime the binaries link against. These are the only
+          # non-system libraries in the build (OpenSSL is disabled).
           SEEDS=()
           for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
             if [ -e "/usr/local/cuda/lib64/$lib" ]; then
               SEEDS+=("/usr/local/cuda/lib64/$lib")
             fi
           done
-          for lib in libssl.so.3 libcrypto.so.3; do
-            path=$(ldconfig -p | awk -v l="$lib" '$1 == l {print $NF; exit}')
-            if [ -n "$path" ]; then
-              SEEDS+=("$path")
-            fi
-          done
           if [ ${#SEEDS[@]} -eq 0 ]; then
-            echo "No seed libraries found"; exit 1
+            echo "No CUDA libraries found in /usr/local/cuda/lib64"; exit 1
           fi
           echo "Seeding from: ${SEEDS[*]}"
 
@@ -195,34 +190,54 @@ jobs:
           echo "--- libs.txt ---"; cat libs.txt
           du -sh "$FOLDER/lib"
 
-          # Archive with lib/ at the root so it can be extracted straight into a
-          # llama-cuda12-sm61-<tag> folder.
-          tar -czvf "cuda-${CUDA_VERSION}-libs.tar.gz" -C "$FOLDER" lib
+          # Archive the whole folder, so extracting it next to the
+          # llama-cuda12-sm61-<tag> folder gives:
+          #   <parent>/cuda12.9-libs/lib/...
+          #   <parent>/llama-cuda12-sm61-<tag>/llama-server
+          tar -czvf "${FOLDER}.tar.gz" "$FOLDER"
 
-      - name: Publish libraries release
+      - name: Publish CUDA libraries release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: cuda-${{ env.CUDA_VERSION }}-libs
+          tag_name: cuda${{ env.CUDA_VERSION }}-libs
           name: "CUDA ${{ env.CUDA_VERSION }} runtime libraries (sm61)"
           body: |
-            Shared libraries required by the `llama-cuda12-sm61-*` binaries, built from CUDA ${{ env.CUDA_VERSION }}.
+            CUDA runtime libraries required by the `llama-cuda12-sm61-*` binaries:
+            `libcudart`, `libcublas`, `libcublasLt` and their dependencies. See `libs.txt`
+            for the exact list.
 
-            Extract into the llama.cpp folder so the binaries find `lib/`:
+            Extract it **next to** the llama.cpp folder (not inside it). The binaries look for
+            `../cuda${{ env.CUDA_VERSION }}-libs/lib` first, then `./lib`:
 
             ```sh
-            tar -xzvf cuda-${{ env.CUDA_VERSION }}-libs.tar.gz -C llama-cuda12-sm61-<tag>
+            tar -xzvf llama-cuda12-sm61-<tag>.tar.gz
+            tar -xzvf cuda${{ env.CUDA_VERSION }}-libs.tar.gz
+            ./llama-cuda12-sm61-<tag>/llama-server --version
+            ```
+
+            Resulting layout:
+
+            ```
+            .
+            ├── cuda${{ env.CUDA_VERSION }}-libs/
+            │   └── lib/
+            └── llama-cuda12-sm61-<tag>/
+                ├── llama-cli
+                ├── llama-server
+                └── llama-bench
             ```
 
             Not included (expected from the host): `libcuda.so.1` / `libnvidia-*` (NVIDIA driver) and glibc / libstdc++ / libgcc_s (base OS).
           files: |
-            cuda-${{ env.CUDA_VERSION }}-libs.tar.gz
+            cuda${{ env.CUDA_VERSION }}-libs.tar.gz
             libs.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
-    needs: check
-    if: needs.check.outputs.has_work == 'true'
+    needs: [check, cuda-libs]
+    # !cancelled() so this still runs when cuda-libs was skipped (libs already published)
+    if: ${{ !cancelled() && needs.check.outputs.has_work == 'true' }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -242,7 +257,7 @@ jobs:
       - name: Install System Prerequisites
         run: |
           apt-get update && apt-get install -y \
-            git cmake build-essential curl jq tar ninja-build ccache libssl-dev patchelf
+            git cmake build-essential curl jq tar ninja-build ccache patchelf
 
       - name: Checkout llama.cpp at tag
         uses: actions/checkout@v4
@@ -303,7 +318,7 @@ jobs:
             -DGGML_CUDA_NCCL=OFF \
             -DGGML_NCCL=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_NCCL=ON \
-            -DGGML_OPENSSL=ON \
+            -DLLAMA_OPENSSL=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=ON \
             -DLLAMA_BUILD_IS_DEV=OFF \
@@ -332,6 +347,7 @@ jobs:
       - name: Package Binary Artifacts
         run: |
           FOLDER_NAME="llama-cuda12-sm61-${{ matrix.tag }}"
+          LIBS_DIR="cuda${CUDA_VERSION}-libs"
           mkdir -p "$FOLDER_NAME"
 
           # Package only the main operational tools
@@ -339,24 +355,33 @@ jobs:
           cp build/bin/llama-server "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-bench "$FOLDER_NAME/" 2>/dev/null || true
 
-          # The binaries load their shared libraries from lib/ (RPATH $ORIGIN/lib).
-          # Those libraries are published separately, once per CUDA version, as
-          # cuda-<version>-libs.tar.gz, so they are not duplicated in every build.
+          # The CUDA libraries are published separately, once per CUDA version, as
+          # cuda<version>-libs.tar.gz. The binaries look for them in a sibling
+          # folder first (../cuda<version>-libs/lib), then ./lib.
           for bin in "$FOLDER_NAME"/llama-*; do
-            patchelf --set-rpath '$ORIGIN/lib' "$bin"
+            patchelf --set-rpath "\$ORIGIN/../${LIBS_DIR}/lib:\$ORIGIN/lib" "$bin"
             echo "$(basename "$bin") rpath: $(patchelf --print-rpath "$bin")"
           done
 
-          # Sanity check: the only thing allowed to be unresolved is the driver
+          # End-to-end check: fetch the published libraries, lay them out exactly as
+          # a user would, and confirm the binaries resolve everything but the driver.
+          gh release download "${LIBS_DIR}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${LIBS_DIR}.tar.gz" --dir /tmp/libs
+          tar -xzf "/tmp/libs/${LIBS_DIR}.tar.gz" -C /tmp
+
           MISSING=$(ldd "$FOLDER_NAME"/llama-* | awk '/not found/ {print $1}' | sort -u | grep -v '^libcuda\.so' || true)
           if [ -n "$MISSING" ]; then
             echo "Unresolved dependencies:"; echo "$MISSING"; exit 1
           fi
+          echo "All dependencies resolved (except the driver)"
 
           du -sh "$FOLDER_NAME"
 
           # Package as top-level folder archive
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -366,13 +391,17 @@ jobs:
           body: |
             Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA ${{ env.CUDA_VERSION }} for Pascal architecture (Compute Capability 6.1).
 
-            **This archive contains the binaries only.** The shared libraries are published once per CUDA version in the [`cuda-${{ env.CUDA_VERSION }}-libs`](https://github.com/${{ github.repository }}/releases/tag/cuda-${{ env.CUDA_VERSION }}-libs) release. Extract both into the same folder:
+            **This archive contains the binaries only.** The CUDA libraries are published once per CUDA version in the [`cuda${{ env.CUDA_VERSION }}-libs`](https://github.com/${{ github.repository }}/releases/tag/cuda${{ env.CUDA_VERSION }}-libs) release. Extract both archives side by side:
 
             ```sh
             tar -xzvf llama-cuda12-sm61-${{ matrix.tag }}.tar.gz
-            tar -xzvf cuda-${{ env.CUDA_VERSION }}-libs.tar.gz -C llama-cuda12-sm61-${{ matrix.tag }}
+            tar -xzvf cuda${{ env.CUDA_VERSION }}-libs.tar.gz
             ./llama-cuda12-sm61-${{ matrix.tag }}/llama-server --version
             ```
+
+            The binaries look for the libraries in `../cuda${{ env.CUDA_VERSION }}-libs/lib`, so that folder must sit next to the `llama-cuda12-sm61-${{ matrix.tag }}` folder.
+
+            Built with `LLAMA_OPENSSL=OFF`, so HTTPS and Hugging Face model downloads are not available in `llama-server`.
           # b#### builds are marked as pre-releases; numbered releases are regular releases
           prerelease: ${{ startsWith(matrix.tag, 'b') }}
           make_latest: ${{ !startsWith(matrix.tag, 'b') }}
