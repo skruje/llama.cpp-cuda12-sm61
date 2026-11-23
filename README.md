@@ -55,12 +55,34 @@ Not bundled (expected from the host):
 
 Keep the `lib/` folder next to the binaries; moving a binary out of the folder will break it unless you also copy `lib/` or set `LD_LIBRARY_PATH`.
 
+### Two Tarballs
+
+The libraries only change when the CUDA version changes, so they are published **once per CUDA version** instead of being duplicated in every build:
+
+| Release | Contents | Changes when |
+|---|---|---|
+| `llama-cuda12-sm61-<tag>` | binaries only (~small) | every llama.cpp build |
+| `cuda-12.2-libs` | `lib/` with the CUDA runtime + OpenSSL | the CUDA version changes |
+
+Download both and extract the libraries into the binaries folder:
+
+```sh
+tar -xzvf llama-cuda12-sm61-<tag>.tar.gz
+tar -xzvf cuda-12.2-libs.tar.gz -C llama-cuda12-sm61-<tag>
+```
+
+The `cuda-12.2-libs` release also ships a `libs.txt` listing exactly which libraries are inside.
+
 ### Example
 
 ```sh
-# Download and extract the tarball
+# Download and extract the binaries
 wget https://github.com/skruje/llama.cpp-cuda12-sm61/releases/download/<tag>/llama-cuda12-sm61-<tag>.tar.gz
 tar -xzvf llama-cuda12-sm61-<tag>.tar.gz
+
+# Download and extract the CUDA libraries into the same folder
+wget https://github.com/skruje/llama.cpp-cuda12-sm61/releases/download/cuda-12.2-libs/cuda-12.2-libs.tar.gz
+tar -xzvf cuda-12.2-libs.tar.gz -C llama-cuda12-sm61-<tag>
 
 # Navigate to the extracted directory
 cd llama-cuda12-sm61-<tag>
@@ -81,7 +103,7 @@ built with GNU 11.4.0 for Linux x86_64
 - **NVIDIA Drivers**: Check that your NVIDIA drivers (tested on 535.309.01) are working with `nvidia-smi`. The driver must support CUDA 12.x.
 - **CUDA Toolkit**: Not required. The CUDA runtime libraries are bundled in `lib/`.
 - **`libcuda.so.1: cannot open shared object file`**: The NVIDIA driver is missing or not loaded on the host.
-- **`error while loading shared libraries: libcublas.so.12`**: The `lib/` folder was not extracted or was moved away from the binaries.
+- **`error while loading shared libraries: libcublas.so.12`**: The `cuda-12.2-libs` tarball was not extracted into the binaries folder, or `lib/` was moved away from the binaries.
 
 ## Contributing
 

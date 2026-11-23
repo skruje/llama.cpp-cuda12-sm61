@@ -20,6 +20,10 @@ env:
   UPSTREAM_REPO: ggml-org/llama.cpp
   # Number of b#### pre-releases to keep in this repo (stable releases are always kept)
   KEEP_PRERELEASES: 10
+  # CUDA version of the build image. The runtime libraries are published once per
+  # version as a separate release (tag: cuda-<version>-libs), so bumping this is
+  # what triggers a new libraries tarball.
+  CUDA_VERSION: '12.2'
 
 jobs:
   check:
@@ -90,6 +94,129 @@ jobs:
             echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
             echo "Matrix: $MATRIX"
           fi
+
+  libs-check:
+    runs-on: ubuntu-22.04
+    outputs:
+      needs_libs: ${{ steps.check.outputs.needs_libs }}
+    steps:
+      - name: Check whether the CUDA libraries release exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="cuda-${CUDA_VERSION}-libs"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
+          if [ "$CODE" = "200" ]; then
+            echo "Release ${TAG} already exists, nothing to do"
+            echo "needs_libs=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release ${TAG} is missing, it will be published"
+            echo "needs_libs=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  cuda-libs:
+    # Publishes the CUDA runtime libraries once per CUDA version. Bump CUDA_VERSION
+    # (and the container image) to produce a new libraries tarball.
+    needs: libs-check
+    if: needs.libs-check.outputs.needs_libs == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: nvidia/cuda:12.2.2-devel-ubuntu22.04
+    steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update && apt-get install -y curl jq tar libssl-dev patchelf
+
+      - name: Collect CUDA runtime libraries
+        run: |
+          set -euo pipefail
+          FOLDER="cuda-${CUDA_VERSION}-libs"
+          mkdir -p "$FOLDER/lib"
+
+          # Deliberately NOT bundled:
+          #   libcuda.so.1 / libnvidia-*  -> supplied by the host NVIDIA driver
+          #   glibc, libstdc++, libgcc_s  -> supplied by the host OS
+          BASELINE='^(linux-vdso|ld-linux|libc\.so|libm\.so|libpthread\.so|libdl\.so|librt\.so|libgcc_s\.so|libstdc\+\+\.so|libresolv\.so|libutil\.so|libanl\.so|libmvec\.so|libcuda\.so|libnvidia-)'
+
+          deps_of() {
+            ldd "$@" 2>/dev/null | awk '/=> \// {print $3}'
+          }
+
+          # Seed with the libraries ggml-cuda links against, plus OpenSSL
+          SEEDS=()
+          for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
+            if [ -e "/usr/local/cuda/lib64/$lib" ]; then
+              SEEDS+=("/usr/local/cuda/lib64/$lib")
+            fi
+          done
+          for lib in libssl.so.3 libcrypto.so.3; do
+            path=$(ldconfig -p | awk -v l="$lib" '$1 == l {print $NF; exit}')
+            if [ -n "$path" ]; then
+              SEEDS+=("$path")
+            fi
+          done
+          if [ ${#SEEDS[@]} -eq 0 ]; then
+            echo "No seed libraries found"; exit 1
+          fi
+          echo "Seeding from: ${SEEDS[*]}"
+
+          # Walk the dependency graph until it is closed
+          mapfile -t DEPS < <(deps_of "${SEEDS[@]}")
+          while :; do
+            added=0
+            for lib in "${DEPS[@]}"; do
+              base=$(basename "$lib")
+              [[ "$base" =~ $BASELINE ]] && continue
+              [ -e "$FOLDER/lib/$base" ] && continue
+              cp -L "$lib" "$FOLDER/lib/$base"
+              echo "bundled $base"
+              added=1
+              mapfile -t -O "${#DEPS[@]}" DEPS < <(deps_of "$lib")
+            done
+            [ "$added" -eq 0 ] && break
+          done
+
+          # Bundled libraries must find each other in the same directory
+          for lib in "$FOLDER"/lib/*.so*; do
+            patchelf --set-rpath '$ORIGIN' "$lib"
+          done
+
+          ls -1 "$FOLDER/lib" | sort > libs.txt
+          echo "--- libs.txt ---"; cat libs.txt
+          du -sh "$FOLDER/lib"
+
+          # Archive with lib/ at the root so it can be extracted straight into a
+          # llama-cuda12-sm61-<tag> folder.
+          tar -czvf "cuda-${CUDA_VERSION}-libs.tar.gz" -C "$FOLDER" lib
+
+      - name: Publish libraries release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cuda-${{ env.CUDA_VERSION }}-libs
+          name: "CUDA ${{ env.CUDA_VERSION }} runtime libraries (sm61)"
+          body: |
+            Shared libraries required by the `llama-cuda12-sm61-*` binaries, built from CUDA ${{ env.CUDA_VERSION }}.
+
+            Extract into the llama.cpp folder so the binaries find `lib/`:
+
+            ```sh
+            tar -xzvf cuda-${{ env.CUDA_VERSION }}-libs.tar.gz -C llama-cuda12-sm61-<tag>
+            ```
+
+            Not included (expected from the host): `libcuda.so.1` / `libnvidia-*` (NVIDIA driver) and glibc / libstdc++ / libgcc_s (base OS).
+          files: |
+            cuda-${{ env.CUDA_VERSION }}-libs.tar.gz
+            libs.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     needs: check
@@ -203,60 +330,28 @@ jobs:
       - name: Package Binary Artifacts
         run: |
           FOLDER_NAME="llama-cuda12-sm61-${{ matrix.tag }}"
-          mkdir -p "$FOLDER_NAME/lib"
+          mkdir -p "$FOLDER_NAME"
 
           # Package only the main operational tools
           cp build/bin/llama-cli "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-server "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-bench "$FOLDER_NAME/" 2>/dev/null || true
 
-          # --- Bundle shared library dependencies -------------------------------
-          # Everything the binaries need at runtime is copied into lib/, and the
-          # binaries get an RPATH of $ORIGIN/lib so they find it.
-          #
-          # Deliberately NOT bundled:
-          #   libcuda.so.1 / libnvidia-*  -> supplied by the host NVIDIA driver
-          #   glibc, libstdc++, libgcc_s  -> supplied by the host OS
-          BASELINE='^(linux-vdso|ld-linux|libc\.so|libm\.so|libpthread\.so|libdl\.so|librt\.so|libgcc_s\.so|libstdc\+\+\.so|libresolv\.so|libutil\.so|libanl\.so|libmvec\.so|libcuda\.so|libnvidia-)'
-
-          deps_of() {
-            ldd "$@" 2>/dev/null | awk '/=> \// {print $3}'
-          }
-
-          # Walk the dependency graph until it is closed
-          mapfile -t DEPS < <(deps_of "$FOLDER_NAME"/llama-*)
-          while :; do
-            added=0
-            for lib in "${DEPS[@]}"; do
-              base=$(basename "$lib")
-              [[ "$base" =~ $BASELINE ]] && continue
-              [ -e "$FOLDER_NAME/lib/$base" ] && continue
-              cp -L "$lib" "$FOLDER_NAME/lib/$base"
-              echo "bundled $base"
-              added=1
-              mapfile -t -O "${#DEPS[@]}" DEPS < <(deps_of "$lib")
-            done
-            [ "$added" -eq 0 ] && break
-          done
-
-          # Point the binaries at the bundled libraries
+          # The binaries load their shared libraries from lib/ (RPATH $ORIGIN/lib).
+          # Those libraries are published separately, once per CUDA version, as
+          # cuda-<version>-libs.tar.gz, so they are not duplicated in every build.
           for bin in "$FOLDER_NAME"/llama-*; do
             patchelf --set-rpath '$ORIGIN/lib' "$bin"
             echo "$(basename "$bin") rpath: $(patchelf --print-rpath "$bin")"
           done
 
-          # Bundled libraries must find each other in the same directory
-          for lib in "$FOLDER_NAME"/lib/*.so*; do
-            patchelf --set-rpath '$ORIGIN' "$lib"
-          done
-
-          # Fail if anything other than the driver is still unresolved
+          # Sanity check: the only thing allowed to be unresolved is the driver
           MISSING=$(ldd "$FOLDER_NAME"/llama-* | awk '/not found/ {print $1}' | sort -u | grep -v '^libcuda\.so' || true)
           if [ -n "$MISSING" ]; then
             echo "Unresolved dependencies:"; echo "$MISSING"; exit 1
           fi
 
-          du -sh "$FOLDER_NAME" "$FOLDER_NAME/lib"
+          du -sh "$FOLDER_NAME"
 
           # Package as top-level folder archive
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
@@ -267,7 +362,15 @@ jobs:
           tag_name: ${{ matrix.tag }}
           name: "llama.cpp ${{ matrix.tag }} (CUDA 12.2 / sm61)"
           body: |
-            Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA 12.2 for Pascal architecture (Compute Capability 6.1).
+            Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA ${{ env.CUDA_VERSION }} for Pascal architecture (Compute Capability 6.1).
+
+            **This archive contains the binaries only.** The shared libraries are published once per CUDA version in the [`cuda-${{ env.CUDA_VERSION }}-libs`](https://github.com/${{ github.repository }}/releases/tag/cuda-${{ env.CUDA_VERSION }}-libs) release. Extract both into the same folder:
+
+            ```sh
+            tar -xzvf llama-cuda12-sm61-${{ matrix.tag }}.tar.gz
+            tar -xzvf cuda-${{ env.CUDA_VERSION }}-libs.tar.gz -C llama-cuda12-sm61-${{ matrix.tag }}
+            ./llama-cuda12-sm61-${{ matrix.tag }}/llama-server --version
+            ```
           # b#### builds are marked as pre-releases; numbered releases are regular releases
           prerelease: ${{ startsWith(matrix.tag, 'b') }}
           make_latest: ${{ !startsWith(matrix.tag, 'b') }}
