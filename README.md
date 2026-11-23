@@ -2,7 +2,9 @@
 
 ## Overview
 
-This repository contains a GitHub Actions workflow that automates the build process for the [llama.cpp](https://github.com/ggml-org/llama.cpp) project, specifically for Pascal generation GPUs (e.g., Tesla P4) using CUDA 12.2 and compute capability SM_61. The workflow checks for new releases of `llama.cpp` (both numbered releases such as `1.0.0` and `b####` pre-releases), compiles them with the necessary configurations, and packages the resulting binaries as a tarball for easy distribution.
+This repository contains a GitHub Actions workflow that automates the build process for the [llama.cpp](https://github.com/ggml-org/llama.cpp) project, specifically for Pascal generation GPUs (e.g., Tesla P4) using CUDA 12.9 and compute capability SM_61. The workflow checks for new releases of `llama.cpp` (both numbered releases such as `1.0.0` and `b####` pre-releases), compiles them with the necessary configurations, and packages the resulting binaries as a tarball for easy distribution.
+
+CUDA 12.9 is used because it is the **last CUDA 12.x release** and the last one that can still target Pascal. CUDA 13.0 dropped Maxwell, Pascal and Volta support entirely.
 
 ## Release Policy
 
@@ -62,16 +64,16 @@ The libraries only change when the CUDA version changes, so they are published *
 | Release | Contents | Changes when |
 |---|---|---|
 | `llama-cuda12-sm61-<tag>` | binaries only (~small) | every llama.cpp build |
-| `cuda-12.2-libs` | `lib/` with the CUDA runtime + OpenSSL | the CUDA version changes |
+| `cuda-12.9-libs` | `lib/` with the CUDA runtime + OpenSSL | the CUDA version changes |
 
 Download both and extract the libraries into the binaries folder:
 
 ```sh
 tar -xzvf llama-cuda12-sm61-<tag>.tar.gz
-tar -xzvf cuda-12.2-libs.tar.gz -C llama-cuda12-sm61-<tag>
+tar -xzvf cuda-12.9-libs.tar.gz -C llama-cuda12-sm61-<tag>
 ```
 
-The `cuda-12.2-libs` release also ships a `libs.txt` listing exactly which libraries are inside.
+The `cuda-12.9-libs` release also ships a `libs.txt` listing exactly which libraries are inside.
 
 ### Example
 
@@ -81,8 +83,8 @@ wget https://github.com/skruje/llama.cpp-cuda12-sm61/releases/download/<tag>/lla
 tar -xzvf llama-cuda12-sm61-<tag>.tar.gz
 
 # Download and extract the CUDA libraries into the same folder
-wget https://github.com/skruje/llama.cpp-cuda12-sm61/releases/download/cuda-12.2-libs/cuda-12.2-libs.tar.gz
-tar -xzvf cuda-12.2-libs.tar.gz -C llama-cuda12-sm61-<tag>
+wget https://github.com/skruje/llama.cpp-cuda12-sm61/releases/download/cuda-12.9-libs/cuda-12.9-libs.tar.gz
+tar -xzvf cuda-12.9-libs.tar.gz -C llama-cuda12-sm61-<tag>
 
 # Navigate to the extracted directory
 cd llama-cuda12-sm61-<tag>
@@ -100,10 +102,10 @@ built with GNU 11.4.0 for Linux x86_64
 
 ## Troubleshooting
 
-- **NVIDIA Drivers**: Check that your NVIDIA drivers (tested on 535.309.01) are working with `nvidia-smi`. The driver must support CUDA 12.x.
+- **NVIDIA Drivers**: Check that your NVIDIA drivers are working with `nvidia-smi`. The driver must be **≥ 525.60.13** (any CUDA 12.x driver works, thanks to CUDA minor version compatibility).
 - **CUDA Toolkit**: Not required. The CUDA runtime libraries are bundled in `lib/`.
 - **`libcuda.so.1: cannot open shared object file`**: The NVIDIA driver is missing or not loaded on the host.
-- **`error while loading shared libraries: libcublas.so.12`**: The `cuda-12.2-libs` tarball was not extracted into the binaries folder, or `lib/` was moved away from the binaries.
+- **`error while loading shared libraries: libcublas.so.12`**: The `cuda-12.9-libs` tarball was not extracted into the binaries folder, or `lib/` was moved away from the binaries.
 
 ## Contributing
 

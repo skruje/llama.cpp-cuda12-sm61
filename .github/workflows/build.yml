@@ -23,7 +23,9 @@ env:
   # CUDA version of the build image. The runtime libraries are published once per
   # version as a separate release (tag: cuda-<version>-libs), so bumping this is
   # what triggers a new libraries tarball.
-  CUDA_VERSION: '12.2'
+  # 12.9 is the last CUDA 12.x release and the last one that can target Pascal.
+  CUDA_VERSION: '12.9'
+  CUDA_IMAGE: nvidia/cuda:12.9.2-devel-ubuntu22.04
 
 jobs:
   check:
@@ -129,7 +131,7 @@ jobs:
       run:
         shell: bash
     container:
-      image: nvidia/cuda:12.2.2-devel-ubuntu22.04
+      image: ${{ env.CUDA_IMAGE }}
     steps:
       - name: Install prerequisites
         run: |
@@ -233,8 +235,8 @@ jobs:
         # Container jobs can default to sh (dash); make sure steps run under bash
         shell: bash
     container:
-      # Matches the local CUDA 12.2 environment
-      image: nvidia/cuda:12.2.2-devel-ubuntu22.04
+      # CUDA 12.9 — last 12.x release, last one that can target Pascal (sm_61)
+      image: ${{ env.CUDA_IMAGE }}
 
     steps:
       - name: Install System Prerequisites
@@ -275,16 +277,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-cuda122-sm61-${{ matrix.tag }}
+          key: ccache-cuda129-sm61-${{ matrix.tag }}
           restore-keys: |
-            ccache-cuda122-sm61-
+            ccache-cuda129-sm61-
 
       - name: Configure ccache environment
         run: |
           ccache --max-size=2G
           ccache -z
 
-      - name: Configure CMake for CUDA 12.2 & sm_61 (Ninja + ccache)
+      - name: Configure CMake for CUDA ${{ env.CUDA_VERSION }} & sm_61 (Ninja + ccache)
         run: |
           rm -rf build
 
@@ -360,7 +362,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.tag }}
-          name: "llama.cpp ${{ matrix.tag }} (CUDA 12.2 / sm61)"
+          name: "llama.cpp ${{ matrix.tag }} (CUDA ${{ env.CUDA_VERSION }} / sm61)"
           body: |
             Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA ${{ env.CUDA_VERSION }} for Pascal architecture (Compute Capability 6.1).
 
