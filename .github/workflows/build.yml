@@ -124,12 +124,15 @@ jobs:
         with:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ matrix.tag }}
-          # Full history is needed so the commit count (build number) is correct
-          fetch-depth: 0
+          # Shallow clone: the build number comes from the tag (b####) or the API,
+          # so the full history is not needed.
+          fetch-depth: 1
           submodules: recursive
 
       - name: Determine build number and commit
         id: buildinfo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Inside the container the workspace is owned by a different user, which makes
           # git refuse to run ("dubious ownership") and llama.cpp then falls back to
@@ -137,11 +140,26 @@ jobs:
           git config --global --add safe.directory '*'
 
           TAG="${{ matrix.tag }}"
-          COMMIT=$(git rev-parse --short HEAD)
-          # POSIX-compatible: b#### tags use the number from the tag, others use the commit count
+          COMMIT=$(git rev-parse --short=9 HEAD)
+
+          # b#### tags already carry the build number. For numbered releases the
+          # number is upstream's commit count, which the API reports in the Link
+          # header of a single-commit request (rel="last" -> page=<count>).
           case "$TAG" in
-            b[0-9]*) NUMBER="${TAG#b}" ;;
-            *)       NUMBER=$(git rev-list --count HEAD) ;;
+            b[0-9]*)
+              NUMBER="${TAG#b}"
+              ;;
+            *)
+              NUMBER=$(curl -fsSI \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${UPSTREAM_REPO}/commits?sha=${TAG}&per_page=1" \
+                | tr -d '\r' \
+                | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
+              if [ -z "$NUMBER" ]; then
+                echo "Could not determine commit count for ${TAG}"; exit 1
+              fi
+              ;;
           esac
 
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
