@@ -101,6 +101,10 @@ jobs:
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     permissions:
       contents: write  # Grants GITHUB_TOKEN permission to create releases and upload artifacts
+    defaults:
+      run:
+        # Container jobs can default to sh (dash); make sure steps run under bash
+        shell: bash
     container:
       # Matches the local CUDA 12.2 environment
       image: nvidia/cuda:12.2.2-devel-ubuntu22.04
@@ -130,11 +134,11 @@ jobs:
 
           TAG="${{ matrix.tag }}"
           COMMIT=$(git rev-parse --short HEAD)
-          if [[ "$TAG" =~ ^b([0-9]+)$ ]]; then
-            NUMBER="${BASH_REMATCH[1]}"
-          else
-            NUMBER=$(git rev-list --count HEAD)
-          fi
+          # POSIX-compatible: b#### tags use the number from the tag, others use the commit count
+          case "$TAG" in
+            b[0-9]*) NUMBER="${TAG#b}" ;;
+            *)       NUMBER=$(git rev-list --count HEAD) ;;
+          esac
 
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
