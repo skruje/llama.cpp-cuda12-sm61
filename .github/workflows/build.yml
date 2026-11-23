@@ -117,7 +117,7 @@ jobs:
       - name: Install System Prerequisites
         run: |
           apt-get update && apt-get install -y \
-            git cmake build-essential curl jq tar ninja-build ccache
+            git cmake build-essential curl jq tar ninja-build ccache libssl-dev
 
       - name: Checkout llama.cpp at tag
         uses: actions/checkout@v4
@@ -179,7 +179,7 @@ jobs:
             -DGGML_CUDA_NCCL=OFF \
             -DGGML_NCCL=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_NCCL=ON \
-            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_OPENSSL=ON \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=ON \
             -DLLAMA_BUILD_IS_DEV=OFF \
@@ -228,9 +228,7 @@ jobs:
           body: |
             Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA ${{ env.CUDA_VERSION }} for Pascal architecture (Compute Capability 6.1).
 
-            Requires the CUDA ${{ env.CUDA_VERSION }} runtime libraries on the host (or set `LD_LIBRARY_PATH` to a CUDA ${{ env.CUDA_VERSION }} `lib64` directory).
-
-            Built with `LLAMA_OPENSSL=OFF`, so HTTPS and Hugging Face model downloads are not available in `llama-server`.
+            Requires the CUDA ${{ env.CUDA_VERSION }} runtime libraries and OpenSSL 3 (`libssl.so.3`, `libcrypto.so.3`) on the host (or set `LD_LIBRARY_PATH` to a directory containing them).
           # b#### builds are marked as pre-releases; numbered releases are regular releases
           prerelease: ${{ startsWith(matrix.tag, 'b') }}
           make_latest: ${{ !startsWith(matrix.tag, 'b') }}

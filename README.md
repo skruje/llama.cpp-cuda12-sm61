@@ -72,7 +72,7 @@ built with GNU 11.4.0 for Linux x86_64
 - **CUDA Toolkit**: The CUDA 12.2 runtime libraries must be available on the host. If they are not in the default loader path, set `LD_LIBRARY_PATH`.
 - **`libcuda.so.1: cannot open shared object file`**: The NVIDIA driver is missing or not loaded on the host.
 - **`error while loading shared libraries: libcublas.so.12`**: The CUDA 12.2 runtime libraries are not installed, or not in the loader path. Set `LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64`.
-- **HTTPS / Hugging Face downloads fail in `llama-server`**: These builds use `LLAMA_OPENSSL=OFF`, so there is no TLS support. Download models with `curl`/`wget` and pass a local path instead.
+- **`error while loading shared libraries: libssl.so.3`**: OpenSSL 3 is not installed on the host. Install `libssl3` (Debian/Ubuntu) or set `LD_LIBRARY_PATH` to a directory containing `libssl.so.3` and `libcrypto.so.3`.
 
 ## Contributing
 
