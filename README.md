@@ -33,6 +33,28 @@ This repository contains a GitHub Actions workflow that automates the build proc
    - Navigate to the extracted directory.
    - Run the desired binary (e.g., `./llama-cli`).
 
+### Bundled Libraries
+
+The tarball is self-contained apart from the GPU driver and the base OS:
+
+```
+llama-cuda12-sm61-<tag>/
+├── llama-cli
+├── llama-server
+├── llama-bench
+└── lib/            # CUDA runtime + other shared libraries
+```
+
+The binaries are patched with an RPATH of `$ORIGIN/lib`, so they load the bundled libraries automatically. **You do not need the CUDA toolkit installed** — only a working NVIDIA driver (`libcuda.so.1`), which the driver package provides.
+
+Bundled: CUDA runtime (`libcudart`, `libcublas`, `libcublasLt`), OpenSSL, and any other non-system shared libraries the binaries need.
+
+Not bundled (expected from the host):
+- `libcuda.so.1` and `libnvidia-*` — installed with the NVIDIA driver.
+- glibc, `libstdc++`, `libgcc_s` — part of the base OS.
+
+Keep the `lib/` folder next to the binaries; moving a binary out of the folder will break it unless you also copy `lib/` or set `LD_LIBRARY_PATH`.
+
 ### Example
 
 ```sh
@@ -56,8 +78,10 @@ built with GNU 11.4.0 for Linux x86_64
 
 ## Troubleshooting
 
-- **NVIDIA Drivers**: Check that your NVIDIA drivers (tested on 535.309.01) are working with `nvidia-smi`.
-- **CUDA Version**: Ensure you have CUDA 12.2 or later installed.
+- **NVIDIA Drivers**: Check that your NVIDIA drivers (tested on 535.309.01) are working with `nvidia-smi`. The driver must support CUDA 12.x.
+- **CUDA Toolkit**: Not required. The CUDA runtime libraries are bundled in `lib/`.
+- **`libcuda.so.1: cannot open shared object file`**: The NVIDIA driver is missing or not loaded on the host.
+- **`error while loading shared libraries: libcublas.so.12`**: The `lib/` folder was not extracted or was moved away from the binaries.
 
 ## Contributing
 

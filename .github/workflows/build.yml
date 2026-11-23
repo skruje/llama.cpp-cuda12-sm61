@@ -113,7 +113,7 @@ jobs:
       - name: Install System Prerequisites
         run: |
           apt-get update && apt-get install -y \
-            git cmake build-essential curl jq tar ninja-build ccache libssl-dev
+            git cmake build-essential curl jq tar ninja-build ccache libssl-dev patchelf
 
       - name: Checkout llama.cpp at tag
         uses: actions/checkout@v4
@@ -203,12 +203,60 @@ jobs:
       - name: Package Binary Artifacts
         run: |
           FOLDER_NAME="llama-cuda12-sm61-${{ matrix.tag }}"
-          mkdir -p "$FOLDER_NAME"
+          mkdir -p "$FOLDER_NAME/lib"
 
           # Package only the main operational tools
           cp build/bin/llama-cli "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-server "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-bench "$FOLDER_NAME/" 2>/dev/null || true
+
+          # --- Bundle shared library dependencies -------------------------------
+          # Everything the binaries need at runtime is copied into lib/, and the
+          # binaries get an RPATH of $ORIGIN/lib so they find it.
+          #
+          # Deliberately NOT bundled:
+          #   libcuda.so.1 / libnvidia-*  -> supplied by the host NVIDIA driver
+          #   glibc, libstdc++, libgcc_s  -> supplied by the host OS
+          BASELINE='^(linux-vdso|ld-linux|libc\.so|libm\.so|libpthread\.so|libdl\.so|librt\.so|libgcc_s\.so|libstdc\+\+\.so|libresolv\.so|libutil\.so|libanl\.so|libmvec\.so|libcuda\.so|libnvidia-)'
+
+          deps_of() {
+            ldd "$@" 2>/dev/null | awk '/=> \// {print $3}'
+          }
+
+          # Walk the dependency graph until it is closed
+          mapfile -t DEPS < <(deps_of "$FOLDER_NAME"/llama-*)
+          while :; do
+            added=0
+            for lib in "${DEPS[@]}"; do
+              base=$(basename "$lib")
+              [[ "$base" =~ $BASELINE ]] && continue
+              [ -e "$FOLDER_NAME/lib/$base" ] && continue
+              cp -L "$lib" "$FOLDER_NAME/lib/$base"
+              echo "bundled $base"
+              added=1
+              mapfile -t -O "${#DEPS[@]}" DEPS < <(deps_of "$lib")
+            done
+            [ "$added" -eq 0 ] && break
+          done
+
+          # Point the binaries at the bundled libraries
+          for bin in "$FOLDER_NAME"/llama-*; do
+            patchelf --set-rpath '$ORIGIN/lib' "$bin"
+            echo "$(basename "$bin") rpath: $(patchelf --print-rpath "$bin")"
+          done
+
+          # Bundled libraries must find each other in the same directory
+          for lib in "$FOLDER_NAME"/lib/*.so*; do
+            patchelf --set-rpath '$ORIGIN' "$lib"
+          done
+
+          # Fail if anything other than the driver is still unresolved
+          MISSING=$(ldd "$FOLDER_NAME"/llama-* | awk '/not found/ {print $1}' | sort -u | grep -v '^libcuda\.so' || true)
+          if [ -n "$MISSING" ]; then
+            echo "Unresolved dependencies:"; echo "$MISSING"; exit 1
+          fi
+
+          du -sh "$FOLDER_NAME" "$FOLDER_NAME/lib"
 
           # Package as top-level folder archive
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
