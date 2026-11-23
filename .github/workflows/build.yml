@@ -166,6 +166,14 @@ jobs:
           fi
           echo "Seeding from: ${SEEDS[*]}"
 
+          # Copy the seed libraries themselves first — the dependency walk below
+          # only collects what they link against, not the seeds.
+          for lib in "${SEEDS[@]}"; do
+            base=$(basename "$lib")
+            cp -L "$lib" "$FOLDER/lib/$base"
+            echo "bundled $base"
+          done
+
           # Walk the dependency graph until it is closed
           mapfile -t DEPS < <(deps_of "${SEEDS[@]}")
           while :; do
@@ -232,6 +240,8 @@ jobs:
           files: |
             cuda${{ env.CUDA_VERSION }}-libs.tar.gz
             libs.txt
+          # Never let the libraries release take the "Latest" badge from llama.cpp
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
