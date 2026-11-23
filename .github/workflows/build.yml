@@ -323,6 +323,7 @@ jobs:
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES="61" \
             -DGGML_CUDA_ARCHITECTURES="61" \
+            -DCMAKE_CUDA_FLAGS="-Wno-deprecated-gpu-targets" \
             -DGGML_CUDA_FORCE_MMQ=ON \
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
