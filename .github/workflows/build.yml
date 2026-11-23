@@ -190,10 +190,15 @@ jobs:
         run: |
           ccache -s
 
-      - name: Verify version string
+      - name: Verify build info
         run: |
-          # --version does not need a GPU, but the CUDA driver lib may be missing on the runner
-          ./build/bin/llama-server --version 2>&1 || true
+          # The binaries cannot run here (no libcuda.so.1 on the runner), so check the
+          # generated build-info.cpp that gets compiled into them instead.
+          INFO=$(find build -name build-info.cpp | head -n1)
+          echo "Checking $INFO"
+          cat "$INFO"
+          grep -q "LLAMA_BUILD_NUMBER = ${{ steps.buildinfo.outputs.number }};" "$INFO"
+          grep -q "\"${{ steps.buildinfo.outputs.commit }}\"" "$INFO"
 
       - name: Package Binary Artifacts
         run: |
