@@ -2,45 +2,115 @@ name: Build llama.cpp for Pascal GPUs (CUDA 12 / sm61)
 
 on:
   schedule:
-    # Polls upstream every 6 hours for new releases
+    # Polls upstream every 6 hours for new stable and b#### releases
     - cron: '0 */6 * * *'
   workflow_dispatch: # Allows manual triggers from GitHub UI
+    inputs:
+      tag:
+        description: 'Upstream tag to (re)build, e.g. 1.0.0 or b5000. Leave empty to build whatever is new.'
+        required: false
+        default: ''
+
+# Never run two polls/builds at once (avoids duplicate release creation / racing cleanup)
+concurrency:
+  group: build-llama-cpp
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: ggml-org/llama.cpp
+  # Number of b#### pre-releases to keep in this repo (stable releases are always kept)
+  KEEP_PRERELEASES: 10
+  # CUDA version of the build image. Matches the local CUDA 12.2 environment.
+  # NOTE: the container image cannot use the env context, so it is hardcoded in
+  # the build job below — keep it in sync with CUDA_VERSION.
+  CUDA_VERSION: '12.2'
 
 jobs:
-  check-and-build:
+  check:
     runs-on: ubuntu-22.04
     outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      latest_tag: ${{ steps.check.outputs.latest_tag }}
+      matrix: ${{ steps.check.outputs.matrix }}
+      has_work: ${{ steps.check.outputs.has_work }}
     steps:
-      - name: Check latest upstream release
+      - name: Determine which upstream tags need building
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MANUAL_TAG: ${{ github.event.inputs.tag }}
         run: |
-          # Fetch latest tag from official llama.cpp repo
-          LATEST_TAG=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest | jq -r .tag_name)
-          
-          # Fetch latest tag from THIS builder repo
-          MY_TAG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r .tag_name)
+          STABLE_RE='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+          PRE_RE='^b[0-9]+$'
+          API="https://api.github.com/repos"
+          AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
 
-          echo "Upstream: $LATEST_TAG | Local: $MY_TAG"
+          release_exists() {
+            local code
+            code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$API/${{ github.repository }}/releases/tags/$1")
+            [ "$code" = "200" ]
+          }
 
-          # Force build if manually triggered OR if upstream release tag is newer
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || ([ "$LATEST_TAG" != "$MY_TAG" ] && [ "$LATEST_TAG" != "null" ]); then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          TAGS=()
+
+          if [ -n "$MANUAL_TAG" ]; then
+            # Explicit request: always (re)build this tag
+            echo "Manual request for tag: $MANUAL_TAG"
+            TAGS+=("$MANUAL_TAG")
           else
-            echo "should_build=false" >> $GITHUB_OUTPUT
+            UPSTREAM=$(curl -fsS "${AUTH[@]}" "$API/$UPSTREAM_REPO/releases?per_page=100")
+            LATEST=$(curl -fsS "${AUTH[@]}" "$API/$UPSTREAM_REPO/releases/latest" | jq -r '.tag_name // empty')
+
+            # Newest numbered release ("latest" endpoint first, then scan the list)
+            STABLE=""
+            if [[ "$LATEST" =~ $STABLE_RE ]]; then
+              STABLE="$LATEST"
+            else
+              STABLE=$(echo "$UPSTREAM" | jq -r --arg re "$STABLE_RE" \
+                '[.[] | select(.draft | not) | .tag_name | select(test($re))] | .[0] // empty')
+            fi
+
+            # Newest b#### release (highest build number)
+            PRE=$(echo "$UPSTREAM" | jq -r --arg re "$PRE_RE" \
+              '[.[] | select(.draft | not) | .tag_name | select(test($re))] | sort_by(.[1:] | tonumber) | last // empty')
+
+            echo "Newest upstream stable: ${STABLE:-none} | newest upstream b####: ${PRE:-none}"
+
+            for T in "$STABLE" "$PRE"; do
+              [ -z "$T" ] && continue
+              if release_exists "$T"; then
+                echo "$T already built, skipping"
+              else
+                echo "$T is new, will build"
+                TAGS+=("$T")
+              fi
+            done
+          fi
+
+          if [ ${#TAGS[@]} -eq 0 ]; then
+            echo "has_work=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"tag":[]}' >> "$GITHUB_OUTPUT"
+          else
+            MATRIX=$(printf '%s\n' "${TAGS[@]}" | jq -R . | jq -sc '{tag: .}')
+            echo "has_work=true" >> "$GITHUB_OUTPUT"
+            echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+            echo "Matrix: $MATRIX"
           fi
 
   build:
-    needs: check-and-build
-    if: needs.check-and-build.outputs.should_build == 'true'
+    needs: check
+    if: needs.check.outputs.has_work == 'true'
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     permissions:
       contents: write  # Grants GITHUB_TOKEN permission to create releases and upload artifacts
+    defaults:
+      run:
+        # Container jobs can default to sh (dash); make sure steps run under bash
+        shell: bash
     container:
-      # Swapped to match your local CUDA 12.2 environment
+      # Matches the local CUDA 12.2 environment
       image: nvidia/cuda:12.2.2-devel-ubuntu22.04
 
     steps:
@@ -49,18 +119,40 @@ jobs:
           apt-get update && apt-get install -y \
             git cmake build-essential curl jq tar ninja-build ccache libssl-dev
 
-      - name: Checkout llama.cpp at release tag
+      - name: Checkout llama.cpp at tag
         uses: actions/checkout@v4
         with:
-          repository: 'ggml-org/llama.cpp'
-          ref: ${{ needs.check-and-build.outputs.latest_tag }}
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ matrix.tag }}
+          # Full history is needed so the commit count (build number) is correct
+          fetch-depth: 0
           submodules: recursive
+
+      - name: Determine build number and commit
+        id: buildinfo
+        run: |
+          # Inside the container the workspace is owned by a different user, which makes
+          # git refuse to run ("dubious ownership") and llama.cpp then falls back to
+          # "build 0, commit unknown". Mark everything as safe.
+          git config --global --add safe.directory '*'
+
+          TAG="${{ matrix.tag }}"
+          COMMIT=$(git rev-parse --short HEAD)
+          # POSIX-compatible: b#### tags use the number from the tag, others use the commit count
+          case "$TAG" in
+            b[0-9]*) NUMBER="${TAG#b}" ;;
+            *)       NUMBER=$(git rev-list --count HEAD) ;;
+          esac
+
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Build number: $NUMBER | commit: $COMMIT"
 
       - name: Set up ccache cache directory
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-cuda122-sm61-${{ needs.check-and-build.outputs.latest_tag }}
+          key: ccache-cuda122-sm61-${{ matrix.tag }}
           restore-keys: |
             ccache-cuda122-sm61-
 
@@ -69,7 +161,7 @@ jobs:
           ccache --max-size=2G
           ccache -z
 
-      - name: Configure CMake for CUDA 12.2 & sm_61 (Ninja + ccache)
+      - name: Configure CMake for CUDA ${{ env.CUDA_VERSION }} & sm_61 (Ninja + ccache)
         run: |
           rm -rf build
 
@@ -80,16 +172,19 @@ jobs:
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES="61" \
             -DGGML_CUDA_ARCHITECTURES="61" \
+            -DCMAKE_CUDA_FLAGS="-Wno-deprecated-gpu-targets" \
             -DGGML_CUDA_FORCE_MMQ=ON \
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_CUDA_NCCL=OFF \
             -DGGML_NCCL=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_NCCL=ON \
-            -DGGML_OPENSSL=ON \
+            -DLLAMA_OPENSSL=ON \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=ON \
             -DLLAMA_BUILD_IS_DEV=OFF \
+            -DLLAMA_BUILD_NUMBER=${{ steps.buildinfo.outputs.number }} \
+            -DLLAMA_BUILD_COMMIT=${{ steps.buildinfo.outputs.commit }} \
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Compile llama.cpp
@@ -100,9 +195,19 @@ jobs:
         run: |
           ccache -s
 
+      - name: Verify build info
+        run: |
+          # The binaries cannot run here (no libcuda.so.1 on the runner), so check the
+          # generated build-info.cpp that gets compiled into them instead.
+          INFO=$(find build -name build-info.cpp | head -n1)
+          echo "Checking $INFO"
+          cat "$INFO"
+          grep -q "LLAMA_BUILD_NUMBER = ${{ steps.buildinfo.outputs.number }};" "$INFO"
+          grep -q "\"${{ steps.buildinfo.outputs.commit }}\"" "$INFO"
+
       - name: Package Binary Artifacts
         run: |
-          FOLDER_NAME="llama-cuda12-sm61-${{ needs.check-and-build.outputs.latest_tag }}"
+          FOLDER_NAME="llama-cuda12-sm61-${{ matrix.tag }}"
           mkdir -p "$FOLDER_NAME"
 
           # Package only the main operational tools
@@ -110,15 +215,55 @@ jobs:
           cp build/bin/llama-server "$FOLDER_NAME/" 2>/dev/null || true
           cp build/bin/llama-bench "$FOLDER_NAME/" 2>/dev/null || true
 
+          du -sh "$FOLDER_NAME"
+
           # Package as top-level folder archive
           tar -czvf "${FOLDER_NAME}.tar.gz" "$FOLDER_NAME"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.check-and-build.outputs.latest_tag }}
-          name: "llama.cpp ${{ needs.check-and-build.outputs.latest_tag }} (CUDA 12.2 / sm61)"
-          body: "Automated build of llama.cpp ${{ needs.check-and-build.outputs.latest_tag }} compiled with CUDA 12.2 for Pascal architecture (Compute Capability 6.1)."
-          files: llama-cuda12-sm61-${{ needs.check-and-build.outputs.latest_tag }}.tar.gz
+          tag_name: ${{ matrix.tag }}
+          name: "llama.cpp ${{ matrix.tag }} (CUDA ${{ env.CUDA_VERSION }} / sm61)"
+          body: |
+            Automated build of llama.cpp ${{ matrix.tag }} (build ${{ steps.buildinfo.outputs.number }}, commit ${{ steps.buildinfo.outputs.commit }}) compiled with CUDA ${{ env.CUDA_VERSION }} for Pascal architecture (Compute Capability 6.1).
+
+            Requires the CUDA ${{ env.CUDA_VERSION }} runtime libraries and OpenSSL 3 (`libssl.so.3`, `libcrypto.so.3`) on the host (or set `LD_LIBRARY_PATH` to a directory containing them).
+          # b#### builds are marked as pre-releases; numbered releases are regular releases
+          prerelease: ${{ startsWith(matrix.tag, 'b') }}
+          make_latest: ${{ !startsWith(matrix.tag, 'b') }}
+          files: llama-cuda12-sm61-${{ matrix.tag }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup:
+    # Keep every stable release, but only the newest N b#### pre-releases
+    needs: [check, build]
+    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Prune old b#### pre-releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate "repos/$REPO/releases?per_page=100" | jq -s 'add' > releases.json
+
+          # b#### releases, newest (highest number) first; skip the newest $KEEP_PRERELEASES
+          jq -r --argjson keep "$KEEP_PRERELEASES" '
+            [.[] | select(.tag_name | test("^b[0-9]+$"))]
+            | sort_by(.tag_name[1:] | tonumber) | reverse | .[$keep:]
+            | .[] | "\(.id) \(.tag_name)"' releases.json > to_delete.txt
+
+          if [ ! -s to_delete.txt ]; then
+            echo "Nothing to prune"
+            exit 0
+          fi
+
+          while read -r ID TAG; do
+            echo "Deleting old pre-release $TAG (release id $ID)"
+            gh api -X DELETE "repos/$REPO/releases/$ID"
+            gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" || true
+          done < to_delete.txt
