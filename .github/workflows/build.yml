@@ -24,8 +24,9 @@ env:
   # version as a separate release (tag: cuda-<version>-libs), so bumping this is
   # what triggers a new libraries tarball.
   # 12.9 is the last CUDA 12.x release and the last one that can target Pascal.
+  # NOTE: the container image cannot use the env context, so it is hardcoded in
+  # both jobs below — keep it in sync with CUDA_VERSION.
   CUDA_VERSION: '12.9'
-  CUDA_IMAGE: nvidia/cuda:12.9.2-devel-ubuntu22.04
 
 jobs:
   check:
@@ -131,7 +132,7 @@ jobs:
       run:
         shell: bash
     container:
-      image: ${{ env.CUDA_IMAGE }}
+      image: nvidia/cuda:12.9.2-devel-ubuntu22.04
     steps:
       - name: Install prerequisites
         run: |
@@ -251,7 +252,7 @@ jobs:
         shell: bash
     container:
       # CUDA 12.9 — last 12.x release, last one that can target Pascal (sm_61)
-      image: ${{ env.CUDA_IMAGE }}
+      image: nvidia/cuda:12.9.2-devel-ubuntu22.04
 
     steps:
       - name: Install System Prerequisites
